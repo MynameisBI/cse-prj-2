@@ -10,6 +10,8 @@
 
 
 #define MAX_PATH_LENGTH 36
+#define max(a, b) ((a) > (b) ? a : b)
+#define min(a, b) ((a) < (b) ? a : b)
 
 
 unsigned char* uc_arrayNew_1d(int size) {
@@ -52,10 +54,13 @@ unsigned int get_pixels_abs_diff(unsigned char* p1, unsigned char* p2, int chann
     return abs_diff;
 }
 
+
+
 int* track_object(unsigned char* base_template, int temp_w, int temp_h,
-        unsigned char* frames, int frames_num, int frame_w, int frame_h, int channel, int step) {
+        unsigned char* frames, int frames_num, int frame_w, int frame_h, int channel, int step, float search_window_ratio, char* method) {
     int* object_positions = (int*)calloc(frames_num * 2, sizeof(int));
 
+    // Initialize template
     unsigned char* template = uc_arrayNew_1d(temp_w * temp_h * channel);
     for (int y = 0; y < temp_h; y++) {
         for (int x = 0; x < temp_w; x++) {
@@ -66,26 +71,66 @@ int* track_object(unsigned char* base_template, int temp_w, int temp_h,
         }
     }
 
+    // Initialize search window
+    int search_window_x = 0;
+    int search_window_y = 0;
+    int search_window_w = frame_w;
+    int search_window_h = frame_h;
+
+    // Glide template
     for (int i = 0; i < frames_num; i++) {
         unsigned int frame_index = i * frame_w * frame_h * channel;
-        unsigned int minSAD = -1;
         int object_position[2];
 
-        for (int frame_y = 0; frame_y < frame_h - temp_h; frame_y = frame_y + step) {
-            for (int frame_x = 0; frame_x < frame_w - temp_w; frame_x = frame_x + step) {
-                unsigned int SAD = 0;
-                for (int temp_y = 0; temp_y < temp_h; temp_y = temp_y + step) {
-                    for (int temp_x = 0; temp_x < temp_w; temp_x = temp_x + step) {
-                        int t_pixel_index = (temp_y * temp_w + temp_x) * channel;
-                        int f_pixel_index = ((frame_y + temp_y) * frame_w + frame_x + temp_x) * channel;
-                        SAD += get_pixels_abs_diff(&template[t_pixel_index], &frames[frame_index + f_pixel_index], 3);
+        if (method == "SAD") {
+            unsigned int minSAD = -1;
+
+            for (int frame_y = search_window_y; frame_y < search_window_h - temp_h; frame_y += step) {
+                for (int frame_x = search_window_x; frame_x < search_window_w - temp_w; frame_x += step) {
+                    unsigned int SAD = 0;
+                    for (int temp_y = 0; temp_y < temp_h; temp_y += step) {
+                        for (int temp_x = 0; temp_x < temp_w; temp_x += step) {
+                            int t_pixel_index = (temp_y * temp_w + temp_x) * channel;
+                            int f_pixel_index = ((frame_y + temp_y) * frame_w + frame_x + temp_x) * channel;
+                            SAD += get_pixels_abs_diff(&template[t_pixel_index], &frames[frame_index + f_pixel_index], 3);
+                        }
+                    }
+                    
+                    if (SAD < minSAD) {
+                        minSAD = SAD;
+                        object_position[0] = frame_x;
+                        object_position[1] = frame_y;
                     }
                 }
-                
-                if (SAD < minSAD) {
-                    minSAD = SAD;
-                    object_position[0] = frame_x;
-                    object_position[1] = frame_y;
+            }
+        } else if (method == "NCC") {
+            double maxNCC = 0;
+
+            for (int frame_y = search_window_y; frame_y < search_window_h - temp_h; frame_y = frame_y + step) {
+                for (int frame_x = search_window_x; frame_x < search_window_w - temp_w; frame_x = frame_x + step) {
+                    unsigned long s_ab = 0;
+                    unsigned long s_a2 = 0;
+                    unsigned long s_b2 = 0;
+                    for (int temp_y = 0; temp_y < temp_h; temp_y += step) {
+                        for (int temp_x = 0; temp_x < temp_w; temp_x += step) {
+                            int t_pixel_index = (temp_y * temp_w + temp_x) * channel;
+                            int f_pixel_index = ((frame_y + temp_y) * frame_w + frame_x + temp_x) * channel;
+                            for (int ch = 0; ch < channel; ch++) {
+                                unsigned int a = (unsigned int)template[t_pixel_index + ch];
+                                unsigned int b = (unsigned int)frames[frame_index + f_pixel_index + ch];
+                                s_ab += a * b;
+                                s_a2 += pow(a, 2);
+                                s_b2 += pow(b, 2);
+                            }
+                        }
+                    }
+
+                    double NCC = (double)s_ab / sqrt((double)s_a2 * (double)s_b2);
+                    if (NCC > maxNCC) {
+                        maxNCC = NCC;
+                        object_position[0] = frame_x;
+                        object_position[1] = frame_y;
+                    }
                 }
             }
         }
@@ -93,6 +138,7 @@ int* track_object(unsigned char* base_template, int temp_w, int temp_h,
         object_positions[2 * i] = object_position[0];
         object_positions[2 * i + 1] = object_position[1];
 
+        // Set new template
         for (int y = 0; y < temp_h; y++) {
             for (int x = 0; x < temp_w; x++) {
                 int t_pixel_index = (y * temp_w + x) * channel;
@@ -103,6 +149,12 @@ int* track_object(unsigned char* base_template, int temp_w, int temp_h,
             }
         }
 
+        // Set new search window
+        search_window_x = max(object_position[0] - temp_w * search_window_ratio / 2, 0);
+        search_window_y = max(object_position[1] - temp_h * search_window_ratio / 2, 0);
+        search_window_w = min(temp_w * search_window_ratio, frame_w - search_window_x);
+        search_window_h = min(temp_h * search_window_ratio, frame_h - search_window_y);
+
         printf("\r%d/%d frames tracked.", i+1, frames_num);
         fflush(stdout);
     }
@@ -110,8 +162,6 @@ int* track_object(unsigned char* base_template, int temp_w, int temp_h,
 
     return object_positions;
 }
-
-
 
 void draw_rectangles(unsigned char* frames, int frames_num, int* positions, int width, int height, int channel, int line_width) {
     int rect_w = width;
@@ -151,19 +201,20 @@ void write_frames(const char* path_template, int num, int w, int h, int channel,
 
 int main() {
     int frame_width, frame_height, template_width, template_height, channel;
+    int frames_num = 63;
 
-    unsigned char* frames = load_frames("images/frames/img%d.jpg", 63, &frame_width, &frame_height, &channel);
+    unsigned char* frames = load_frames("images/frames/img%d.jpg", frames_num, &frame_width, &frame_height, &channel);
     unsigned char* template = stbi_load("images/template.jpg", &template_width, &template_height, &channel, 0);
     printf("Load frames and template successfully. Tracking template.\n");
 
     int* object_positions = track_object(template, template_width, template_height, 
-            frames, 63, frame_width, frame_height, channel, 2);
+            frames, frames_num, frame_width, frame_height, channel, 4, 1.5, "NCC");
     printf("Track template completed. Draw rectangles.\n");
 
-    draw_rectangles(frames, 63, object_positions, template_width, template_height, channel, 2);
+    draw_rectangles(frames, frames_num, object_positions, template_width, template_height, channel, 2);
     printf("Rectangles drawn. Writing down images.\n");
 
-    write_frames("images/tracked_frames/img%d.jpg", 63, frame_width, frame_height, channel, frames);
+    write_frames("images/tracked_frames/img%d.jpg", frames_num, frame_width, frame_height, channel, frames);
     printf("Object tracking completed. Please check result.");
 
     return 0;
